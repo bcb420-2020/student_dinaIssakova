@@ -1,2 +1,2 @@
 # student_dinaIssakova
-Test
+https://github.com/bcb420-2020/dinaIssakova/wiki
