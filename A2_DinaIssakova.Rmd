@@ -1,0 +1,252 @@
+---
+title: "A2 - KCvsKR Dataset Differential Expression"
+
+output:
+  html_document:
+    df_print: paged
+    toc: true
+    
+bibliography: a2bib.bib
+    
+
+---
+
+
+```{r install_packages, message=FALSE, echo=FALSE, warning=FALSE}
+if (!require(knitr)){
+  install.packages("knitr")
+}
+if (!require(ComplexHeatmap)){
+  BiocManager::install("ComplexHeatmap")
+}
+if (!require(circlize)){
+  BiocManager::install("circlize")
+}
+if (!require(gprofiler2)){
+  install.packages("gprofiler2")
+}
+if (!require(limma)){
+  install.packages("limma")
+}
+if (!require(Biobase)){
+  BiocManager::install("Biobase")
+}
+library(limma)
+library(Biobase)
+library(ComplexHeatmap)
+library(circlize)
+library(knitr)
+library(gprofiler2)
+```
+
+## Introduction
+
+In the previous assignment, we had sourced, cleaned, and normalized dataset GSE77938. This dataset explores the factors contributing to keratoconus (KTCN). Keratoconus is a disorder of the eye that results in progressive thinning of the cornea, which may result in blurry vision, double vision, nearsightedness, astigmatism, and light sensitivity. This study performed comprehensive transcriptome profiling of human KTCN corneas using an RNA-Seq approach, the discovery analysis comparing eight KTCN (test condition) and eight non-KTCN (control) corneas [@ktcn].
+
+Here, we aim to determine pathways associated with significantly up- and down-reguated genes in KTCN corneas. First, we load the normalized data.(It is necessary to run expr_cleanup.Rmd first.) 
+
+```{r}
+normalized_counts <- readRDS("ncounts.rds")
+head(normalized_counts)
+```
+
+## Differential Expression
+
+First, we conduct differential expression analysis with this normalized expression set. Based on previously generated MDS, the conditions themselves seem to cluster more than any other factors; and indeed no other factors are noted in the dataset. As such, condition is the only factor we will consider in our model. 
+
+```{r}
+samples <- data.frame(
+        lapply(colnames(normalized_counts), 
+        FUN=function(x){
+          unlist(strsplit(x, split = "_"))[1]}))
+colnames(samples) <- colnames(normalized_counts)
+rownames(samples) <- c("cell_type")
+samples <- data.frame(t(samples))
+head(samples)
+```
+
+We then create a design matrix. 
+
+```{r}
+model_design <- model.matrix(~ samples$cell_type)
+head(model_design)
+```
+This is inverted from the 'positive' and 'negative' conditions in the paper (KC is the set of interest (KTCN), KR is the control (non-KTCN).) Thus we reverse it before using the model. 
+
+```{r}
+model_design[,2] <- abs(model_design[,2]-1)
+head(model_design)
+```
+The column name is still "celltypeKR", but that's alright (has no bearing on the analysis).
+
+
+Create data matrix and fit the data to the above model.
+
+```{r}
+expressionMatrix <- as.matrix(normalized_counts)
+rownames(expressionMatrix) <- rownames(normalized_counts)
+colnames(expressionMatrix) <- colnames(normalized_counts)
+minimalSet <- ExpressionSet(assayData=expressionMatrix)
+fit <- lmFit(minimalSet, model_design)
+```
+
+Apply empircal Bayes to compute differential expression for the above described model. Use trend=TRUE as this is RNASeq Data. We used the Benjamini-Hochberg method for mutiple hypothesis correction. This was chosen because BH is specifically optimized to correct for false discovery rate. This is of particular importance in clinical samples, as a falsely enriched gene might point towards a non-existent potential drug target for the disease. However, given the sample size which isn't too large, Bonferroni and other methods would be too strict, not allowing potentially 'true' discoveries to make it through the correction filter. 
+
+```{r}
+fit2 <- eBayes(fit,trend=TRUE)
+
+#edgeR -- 
+
+topfit <- topTable(fit2, 
+                   coef=ncol(model_design),
+                   adjust.method = "BH",
+                   number = nrow(expressionMatrix))
+#merge hgnc names to topfit table
+output_hits <- merge(rownames(normalized_counts),
+                     topfit,
+                     by.y=0,by.x=1,
+                     all.y=TRUE)
+#sort by pvalue
+output_hits <- output_hits[order(output_hits$P.Value),]
+head(output_hits)
+```
+
+How many gene pass the threshold p-value < 0.05? How many pass the correction?
+
+```{r}
+
+length(which(output_hits$P.Value < 0.05))
+length(which(output_hits$adj.P.Val < 0.05))
+```
+
+We can show the overall Volcano plot below. The top gene highlighted is BPTF, a transcription factor (the role of transcription factors in KTCN being discussed later in this report).
+
+```{r echo=FALSE}
+volcanoplot(fit2, highlight = 1, names=rownames(fit))
+```
+
+We can also visualize the top hits using a heatmap. As we can see below, the conditions do cluster together. This is reassuring, as it shows that the expression differences in our top hits are truly associated with the disease phenotype.
+
+```{r echo=FALSE}
+top_hits <- output_hits[which(output_hits$adj.P.Val < 0.05),]$x
+
+heatmap_matrix <- normalized_counts
+rownames(heatmap_matrix) <- rownames(normalized_counts)
+colnames(heatmap_matrix) <- colnames(normalized_counts)
+
+heatmap_matrix <- t(scale(t(heatmap_matrix)))
+
+heatmap_matrix_tophits <- t(
+  scale(t(heatmap_matrix[which(rownames(heatmap_matrix) %in% top_hits),])))
+if(min(heatmap_matrix_tophits) == 0){
+    heatmap_col = colorRamp2(c( 0, max(heatmap_matrix_tophits)), 
+                             c( "white", "red"))
+  } else {
+    heatmap_col = colorRamp2(c(min(heatmap_matrix_tophits), 0, max(heatmap_matrix_tophits)), c("blue", "white", "red"))
+  }
+current_heatmap <- Heatmap(as.matrix(heatmap_matrix_tophits),
+                           name = "DE",
+                           cluster_rows = TRUE,
+                           cluster_columns = TRUE,
+                               show_row_dend = TRUE,
+                               show_column_dend = TRUE, 
+                               col=heatmap_col,
+                               show_column_names = TRUE, 
+                               show_row_names = FALSE,
+                               show_heatmap_legend = TRUE,
+                               
+                               )
+
+current_heatmap
+```
+
+
+## Thresholded over-representation analysis
+
+With our significantly up-regulated and down-regulated set of genes, we can run a thresholded gene set enrichment analysis. A positive log Fold Change indicates an upregulation in the disease state, and a negative a downregulation in the disease state. Here we can see that we have 2562 upregulated genes, and 2092 downregulated genes. 
+
+```{r}
+length(which(output_hits$P.Value < 0.05 & output_hits$logFC > 0))
+length(which(output_hits$P.Value < 0.05 & output_hits$logFC < 0))
+```
+Thresholded list: 
+
+```{r}
+output_hits_withgn <- merge(rownames(normalized_counts),output_hits)
+output_hits_withgn[,"rank"] <- -log(output_hits_withgn$P.Value,base =10) * sign(output_hits_withgn$logFC)
+output_hits_withgn <- output_hits_withgn[order(output_hits_withgn$rank),]
+upregulated_genes <- output_hits_withgn$x[
+  which(output_hits_withgn$P.Value < 0.05 
+             & output_hits_withgn$logFC > 0)]
+downregulated_genes <- output_hits_withgn$x[
+  which(output_hits_withgn$P.Value < 0.05 
+             & output_hits_withgn$logFC < 0)]
+write.table(x=upregulated_genes,
+            file="upregulated_genes.txt",sep = "\t",
+            row.names = FALSE,col.names = FALSE,quote = FALSE)
+write.table(x=downregulated_genes,
+            file="downregulated_genes.txt",sep = "\t",
+            row.names = FALSE,col.names = FALSE,quote = FALSE)
+all_genes <- output_hits_withgn$x
+
+```
+
+I used gProfiler for the thresholded enrichment analysis. This was because it is a common tool, drawing from multiple annotation sources mentioned in class (ex. KEGG, GO, Reactome) and it has a comfortable R interface. This draws the latest versions from each annotation source separately (as of March 3, 2020).
+
+
+Both when the analysis is run using up-regulated and all genes, the top results are transcription factors (ordered gene lists are used). There does not seem to be a large difference in the type of transcription factors that are shown as enriched using each method. However, it should be noted that the original publication performed overrepresentation analysis on upregulated and downregulated genes separately, so analysing the pathways in this manner is consistent with the way the authors approached the problem. 
+
+```{r}
+enrichment <- gost(all_genes, ordered_query = TRUE)
+significant_pathways <- enrichment$result$term_name[order(enrichment$result$p_value)]
+head(significant_pathways)
+```
+
+How many genes overall with a threshold of P < 0.05? 
+
+```{r}
+length(enrichment$result$term_name[which(enrichment$result$p_value < 0.05)])
+
+```
+
+We can also observe where most of these annotations came from and what categories they fall into (most are transcription factors, which is discussed below).
+
+```{r echo=FALSE}
+gostplot(enrichment)
+```
+
+With only up-regulated genes: 
+
+```{r}
+enrichment_up <- gost(upregulated_genes, ordered_query = TRUE)
+significant_pathways_up <- enrichment_up$result$term_name[order(enrichment_up$result$p_value)]
+head(significant_pathways_up)
+```
+
+Only down-regulated genes:
+
+```{r}
+enrichment_dwn <- gost(downregulated_genes)
+significant_pathways_dwn <- enrichment_dwn$result$term_name[order(enrichment_dwn$result$p_value)]
+head(significant_pathways_dwn)
+```
+
+## Interpretation
+
+The main up-regulated factors are ETF, SP4, and other transcription factors: overall, what we see is an upregulation in DNA binding transcription factor actiity. Among these are genes associated with retinal diseases - such as E2F, which is known to be upregulated in retinoblasoma as it is associated with Cdk6 and the Ras pathway. This is consistent with the publication, which also specifically mentions upregulation of CREB phosphorylation through the activation of Ras. Other genes are also among those highly enriched, such as the GRIN gene family (ex. GRIN2B), which are also cited in the paper as upregulated, as part of the CREB phosphorylation and as part of the activation of the NMDA receptor upon glutamate binding and postsynaptic events. 
+
+The down-regulated pathways present a somewhat clearer and more coherent picture. The main down-regulated pathways are adherens-junction related: "anchoring junction", "adherens junction", "extracellular matrix organization" etc. This is supported in the paper as well, as extracellular matrix organization was for the authors also a main down-regulated pathway. The authors state that lower expression of nearly all genes involved in collagen maturation and the ECM stability was observed, and this is replicated in this analysis. This makes sense, as it is known that there are pronounced abnormalities in the extracellular matrix in keratoconus patients [@cornea].
+
+## References
+
+Packages used: 
+
+[limma](https://bioconductor.org/packages/release/bioc/html/limma.html)
+[Biobase](https://www.bioconductor.org/packages/release/bioc/html/Biobase.html)
+[ComplexHeatmap](https://bioconductor.org/packages/release/bioc/html/ComplexHeatmap.html)
+[circlize](https://cran.r-project.org/web/packages/circlize/index.html)
+[knitr](https://yihui.org/knitr/)
+[gprofiler2](https://cran.r-project.org/web/packages/gprofiler2/index.html)
+
+
+
