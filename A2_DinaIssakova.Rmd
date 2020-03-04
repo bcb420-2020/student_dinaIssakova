@@ -95,8 +95,6 @@ Apply empircal Bayes to compute differential expression for the above described 
 ```{r}
 fit2 <- eBayes(fit,trend=TRUE)
 
-#edgeR -- 
-
 topfit <- topTable(fit2, 
                    coef=ncol(model_design),
                    adjust.method = "BH",
