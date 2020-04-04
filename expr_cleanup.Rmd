@@ -307,6 +307,6 @@ Code for normalization and data analysis of the dataset is mostly taken from BCB
 Final dataset: 
 
 ```{r}
-normalized_counts
+head(normalized_counts)
 ```
 
